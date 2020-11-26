@@ -1,59 +1,95 @@
 import glob from 'glob'
 import fs from 'fs'
+import { EventEmitter } from 'events'
+
+import InternalError from './core/errors/InternalError'
+import extractData from './core/extractData'
+import debug from './core/debug'
 
 interface Options {
-    returnUndefined: boolean;
+    returnUndefined?: boolean;
+    defaultLanguage: string;
+    debug?: boolean
 }
 
-export default class Locale {
-    public dir: string
-    public languages: any
+export default class Locale extends EventEmitter {
+    private dir: string
+    private languages: any
     public actualLang: string
     public options: Options
 
-    constructor(dir: string) {
+    constructor(dir: string, options: Options) {
+        super()
         this.dir = dir;
 
         this.languages = {}
-        this.actualLang = 'pt'
+        this.actualLang = options.defaultLanguage
 
-        this.options = {
-            returnUndefined: true
-        };
+        this.options = options
+        debug(this)
     }
 
     async init() {
-        const dirs = glob.sync(this.dir + '/**/*.json');
+        this.emit('init')
 
-        return new Promise(pass => {
+        const dirs = glob.sync(this.dir + '/**/*.*');
+
+        return new Promise(async (pass) => {
             for (const file of dirs) {
-                const lang = file.split('/')[2];
+                const data = fs.readFileSync(file)
 
-                fs.readFile(file, async (err: any, data: any) => {
-                    this.languages[lang] = {};
-                    this.languages[lang][file.split('/')[3].replace('.json', '')] = JSON.parse(data.toString());
+                const split = file.split('/')
+                const lang = split[split.length - 2];
 
-                    await pass(true);
-                });
+                const $data = await extractData(data, file)
+
+                typeof this.languages[lang] === 'undefined'
+                    ? this.languages[lang] = {}
+                    : null
+
+                this.languages[lang][split[split.length - 1].split('.')[0]] = $data
+
+                await pass(true);
             }
+            this.emit('initFinished', dirs.length)
         });
     }
 
     async setLang(lang: string) {
+        if (!this.languages[lang]) {
+            this.emit('error')
+            throw new InternalError('This language does not exist or not been loaded.')
+        }
+
+        this.emit('languageChanged', ({ $lang: lang, newLang: this.actualLang }))
+
         this.actualLang = lang;
     }
 
-    t(locale: string, options ? : {}) {
+    t(locale: string, options?: {}) {
+        if (!this.languages[this.actualLang]) {
+            this.emit('error')
+            throw new InternalError('The actual language does not exist or not been loaded.')
+        }
+
         const props = locale.split(':');
         let res = this.languages[this.actualLang];
 
         for (const prop of props) {
             if (prop.includes('.')) {
                 for (const $prop of prop.split('.')) {
-                    res = res[$prop];
+                    if (res !== undefined) res = res[$prop];
+                    else {
+                        if (!this.options.returnUndefined) return 'No locale available';
+                        else return undefined
+                    }
                 }
             } else {
-                res = res[prop];
+                if (res !== undefined) res = res[prop];
+                else {
+                    if (!this.options.returnUndefined) return 'No locale available';
+                    else return undefined
+                }
             }
         }
 
@@ -64,7 +100,7 @@ export default class Locale {
         }
     }
 
-    format(locale: string, options ? : object) {
+    format(locale: string, options?: object) {
         let response = locale;
         if (options) {
             for (const [option, value] of Object.entries(options)) {
